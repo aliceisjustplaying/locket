@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -207,12 +208,44 @@ class CoreTests(unittest.TestCase):
         result = core.status(self.path)
         self.assertEqual(result.kind, core.StatusKind.CORRUPT)
 
+    def test_acquire_rejects_unreadable_token_file_as_corrupt(self) -> None:
+        lock_dir = self.path.parent / f"{self.path.name}.locket"
+        token_path = lock_dir / core.TOKENFILE_NAME
+        lock_dir.mkdir()
+        token_path.write_text("abcd1234\n", encoding="utf-8")
+        token_path.chmod(0)
+        with self.assertRaises(core.LockError) as ctx:
+            core.acquire(self.path, timeout=0)
+        self.assertEqual(ctx.exception.exit_code, core.EXIT_BAD_LOCK)
+
+    def test_status_reports_unreadable_token_file_as_corrupt(self) -> None:
+        lock_dir = self.path.parent / f"{self.path.name}.locket"
+        token_path = lock_dir / core.TOKENFILE_NAME
+        lock_dir.mkdir()
+        token_path.write_text("abcd1234\n", encoding="utf-8")
+        token_path.chmod(0)
+        result = core.status(self.path)
+        self.assertEqual(result.kind, core.StatusKind.CORRUPT)
+
     def test_status_reports_symlinked_token_file_as_corrupt(self) -> None:
         lock_dir = self.path.parent / f"{self.path.name}.locket"
         external_token = self.path.parent / "external-token"
         external_token.write_text("abcd1234\n", encoding="utf-8")
         lock_dir.mkdir()
         (lock_dir / core.TOKENFILE_NAME).symlink_to(external_token)
+        result = core.status(self.path)
+        self.assertEqual(result.kind, core.StatusKind.CORRUPT)
+
+    def test_status_reports_symlinked_tag_file_as_corrupt(self) -> None:
+        lock_dir = self.path.parent / f"{self.path.name}.locket"
+        external_tag = self.path.parent / "external-tag"
+        external_tag.write_text(
+            '{"locked_at": "2026-03-18T12:00:00+00:00", "message": "external"}\n',
+            encoding="utf-8",
+        )
+        lock_dir.mkdir()
+        (lock_dir / core.TOKENFILE_NAME).write_text("abcd1234\n", encoding="utf-8")
+        (lock_dir / core.TAGFILE_NAME).symlink_to(external_tag)
         result = core.status(self.path)
         self.assertEqual(result.kind, core.StatusKind.CORRUPT)
 
@@ -251,6 +284,35 @@ class CoreTests(unittest.TestCase):
         external_token.write_text("abcd1234\n", encoding="utf-8")
         lock_dir.mkdir()
         (lock_dir / core.TOKENFILE_NAME).symlink_to(external_token)
+
+        with self.assertRaises(core.LockError) as ctx:
+            core.release(self.path, "abcd1234")
+
+        self.assertEqual(ctx.exception.exit_code, core.EXIT_BAD_LOCK)
+        self.assertTrue(lock_dir.exists())
+
+    def test_release_rejects_unreadable_token_file(self) -> None:
+        lock_dir = self.path.parent / f"{self.path.name}.locket"
+        token_path = lock_dir / core.TOKENFILE_NAME
+        lock_dir.mkdir()
+        token_path.write_text("abcd1234\n", encoding="utf-8")
+        token_path.chmod(0)
+
+        with self.assertRaises(core.LockError) as ctx:
+            core.release(self.path, "abcd1234")
+
+        self.assertEqual(ctx.exception.exit_code, core.EXIT_BAD_LOCK)
+
+    def test_release_rejects_symlinked_tag_file(self) -> None:
+        lock_dir = self.path.parent / f"{self.path.name}.locket"
+        external_tag = self.path.parent / "external-tag"
+        external_tag.write_text(
+            '{"locked_at": "2026-03-18T12:00:00+00:00", "message": "external"}\n',
+            encoding="utf-8",
+        )
+        lock_dir.mkdir()
+        (lock_dir / core.TOKENFILE_NAME).write_text("abcd1234\n", encoding="utf-8")
+        (lock_dir / core.TAGFILE_NAME).symlink_to(external_tag)
 
         with self.assertRaises(core.LockError) as ctx:
             core.release(self.path, "abcd1234")
@@ -393,6 +455,49 @@ class CLITests(unittest.TestCase):
         lock_path = self.path.parent / f"{self.path.name}.locket"
         lock_path.write_text("not a directory\n", encoding="utf-8")
         result = self.run_cli("status", str(self.path))
+        self.assertEqual(result.returncode, core.EXIT_BAD_LOCK)
+        self.assertIn("Corrupt lock directory", result.stdout)
+        self.assertEqual(result.stderr, "")
+
+    def test_status_token_fifo_does_not_hang(self) -> None:
+        lock_dir = self.path.parent / f"{self.path.name}.locket"
+        lock_dir.mkdir()
+        os.mkfifo(lock_dir / core.TOKENFILE_NAME)
+
+        try:
+            result = subprocess.run(
+                [*CLI, "status", str(self.path)],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=1,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail("status hung on a fifo token path")
+
+        self.assertEqual(result.returncode, core.EXIT_BAD_LOCK)
+        self.assertIn("Corrupt lock directory", result.stdout)
+        self.assertEqual(result.stderr, "")
+
+    def test_status_tag_fifo_does_not_hang(self) -> None:
+        lock_dir = self.path.parent / f"{self.path.name}.locket"
+        lock_dir.mkdir()
+        (lock_dir / core.TOKENFILE_NAME).write_text("abcd1234\n", encoding="utf-8")
+        os.mkfifo(lock_dir / core.TAGFILE_NAME)
+
+        try:
+            result = subprocess.run(
+                [*CLI, "status", str(self.path)],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=1,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail("status hung on a fifo tag path")
+
         self.assertEqual(result.returncode, core.EXIT_BAD_LOCK)
         self.assertIn("Corrupt lock directory", result.stdout)
         self.assertEqual(result.stderr, "")

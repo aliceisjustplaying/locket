@@ -109,16 +109,16 @@ def _check_lock_integrity(locket_dir: Path, path: Path, *, check_contents: bool 
     if locket_dir.is_symlink() or (locket_dir.exists() and not locket_dir.is_dir()):
         raise LockError(f"Error: corrupt lock directory for {path}", EXIT_BAD_LOCK)
     if check_contents:
-        token_path = token_file_for(locket_dir)
-        if token_path.is_symlink():
-            raise LockError(f"Error: corrupt lock directory for {path}", EXIT_BAD_LOCK)
+        for child in (token_file_for(locket_dir), tag_file_for(locket_dir)):
+            if child.is_symlink() or (child.exists() and not child.is_file()):
+                raise LockError(f"Error: corrupt lock directory for {path}", EXIT_BAD_LOCK)
 
 
 def read_token(path: Path) -> str | None:
     try:
         value = read_text(path).strip()
         return value or None
-    except (FileNotFoundError, IsADirectoryError, UnicodeDecodeError):
+    except (FileNotFoundError, IsADirectoryError, PermissionError, UnicodeDecodeError):
         return None
 
 

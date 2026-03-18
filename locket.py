@@ -127,6 +127,9 @@ def cmd_with_lock(args: argparse.Namespace) -> int:
     except NotADirectoryError:
         err(f"Error: not a directory in command path: {command[0]}")
         exit_code = EXIT_IO
+    except OSError as exc:
+        err(f"Error: could not execute {command[0]}: {exc}")
+        exit_code = EXIT_IO
     finally:
         try:
             release(path, handle.token)

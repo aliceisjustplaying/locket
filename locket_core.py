@@ -100,6 +100,20 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _check_lock_integrity(locket_dir: Path, path: Path, *, check_contents: bool = False) -> None:
+    """Raise LockError if the lock directory structure looks tampered with.
+
+    When check_contents is True, also inspect files inside the lock directory.
+    This requires the directory to be readable (call after opening permissions).
+    """
+    if locket_dir.is_symlink() or (locket_dir.exists() and not locket_dir.is_dir()):
+        raise LockError(f"Error: corrupt lock directory for {path}", EXIT_BAD_LOCK)
+    if check_contents:
+        token_path = token_file_for(locket_dir)
+        if token_path.is_symlink():
+            raise LockError(f"Error: corrupt lock directory for {path}", EXIT_BAD_LOCK)
+
+
 def read_token(path: Path) -> str | None:
     try:
         value = read_text(path).strip()
@@ -238,9 +252,11 @@ def format_metadata(metadata: LockMetadata) -> str:
 
 def _read_public_lock(path: Path) -> LockHandle | None:
     locket_dir = locket_dir_for(path)
+    _check_lock_integrity(locket_dir, path)
     with temporarily_open_public_lock(locket_dir) as present:
         if not present:
             return None
+        _check_lock_integrity(locket_dir, path, check_contents=True)
         token_path = token_file_for(locket_dir)
         try:
             token = read_token(token_path)
@@ -284,8 +300,7 @@ def acquire(
         raise LockError("Error: --timeout must be non-negative", EXIT_USAGE)
 
     locket_dir = locket_dir_for(path)
-    if locket_dir.is_symlink() or (locket_dir.exists() and not locket_dir.is_dir()):
-        raise LockError(f"Error: corrupt lock directory for {path}", EXIT_BAD_LOCK)
+    _check_lock_integrity(locket_dir, path)
     token = secrets.token_hex(4)
     metadata = build_metadata(message)
     deadline = None if timeout is None else time.monotonic() + timeout
@@ -390,7 +405,7 @@ def status(path: Path) -> LockStatus:
             return LockStatus(
                 kind=StatusKind.CORRUPT,
                 path=path,
-                detail="missing token file",
+                detail="corrupt lock contents",
             )
         raise
     if lock is None:

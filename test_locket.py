@@ -207,6 +207,15 @@ class CoreTests(unittest.TestCase):
         result = core.status(self.path)
         self.assertEqual(result.kind, core.StatusKind.CORRUPT)
 
+    def test_status_reports_symlinked_token_file_as_corrupt(self) -> None:
+        lock_dir = self.path.parent / f"{self.path.name}.locket"
+        external_token = self.path.parent / "external-token"
+        external_token.write_text("abcd1234\n", encoding="utf-8")
+        lock_dir.mkdir()
+        (lock_dir / core.TOKENFILE_NAME).symlink_to(external_token)
+        result = core.status(self.path)
+        self.assertEqual(result.kind, core.StatusKind.CORRUPT)
+
     def test_status_ignores_invalid_utf8_tag(self) -> None:
         lock_dir = self.path.parent / f"{self.path.name}.locket"
         lock_dir.mkdir()
@@ -214,6 +223,40 @@ class CoreTests(unittest.TestCase):
         (lock_dir / core.TAGFILE_NAME).write_bytes(b"\xff\n")
         result = core.status(self.path)
         self.assertEqual(result.kind, core.StatusKind.LOCKED)
+
+    def test_release_rejects_regular_file_lock_path_as_corrupt(self) -> None:
+        lock_path = self.path.parent / f"{self.path.name}.locket"
+        lock_path.write_text("not a directory\n", encoding="utf-8")
+        with self.assertRaises(core.LockError) as ctx:
+            core.release(self.path, "abcd1234")
+        self.assertEqual(ctx.exception.exit_code, core.EXIT_BAD_LOCK)
+
+    def test_release_rejects_symlinked_lock_directory_without_mutating_it(self) -> None:
+        lock_path = self.path.parent / f"{self.path.name}.locket"
+        actual_lock_dir = self.path.parent / "actual-lock-dir"
+        actual_lock_dir.mkdir()
+        (actual_lock_dir / core.TOKENFILE_NAME).write_text("abcd1234\n", encoding="utf-8")
+        lock_path.symlink_to(actual_lock_dir, target_is_directory=True)
+
+        with self.assertRaises(core.LockError) as ctx:
+            core.release(self.path, "abcd1234")
+
+        self.assertEqual(ctx.exception.exit_code, core.EXIT_BAD_LOCK)
+        self.assertTrue(lock_path.is_symlink())
+        self.assertTrue(actual_lock_dir.exists())
+
+    def test_release_rejects_symlinked_token_file(self) -> None:
+        lock_dir = self.path.parent / f"{self.path.name}.locket"
+        external_token = self.path.parent / "external-token"
+        external_token.write_text("abcd1234\n", encoding="utf-8")
+        lock_dir.mkdir()
+        (lock_dir / core.TOKENFILE_NAME).symlink_to(external_token)
+
+        with self.assertRaises(core.LockError) as ctx:
+            core.release(self.path, "abcd1234")
+
+        self.assertEqual(ctx.exception.exit_code, core.EXIT_BAD_LOCK)
+        self.assertTrue(lock_dir.exists())
 
     def test_release_rejects_blank_token_file(self) -> None:
         lock_dir = self.path.parent / f"{self.path.name}.locket"
@@ -407,6 +450,21 @@ class CLITests(unittest.TestCase):
         not_a_directory = Path(self.tmpdir.name) / "not-a-directory"
         not_a_directory.write_text("hello\n", encoding="utf-8")
         command = not_a_directory / "child-command"
+
+        result = self.run_cli("with-lock", str(self.path), "--", str(command))
+        self.assertEqual(result.returncode, core.EXIT_IO)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(str(command), result.stderr)
+
+        status = self.run_cli("status", str(self.path))
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+        self.assertIn("Unlocked:", status.stdout)
+
+    def test_with_lock_exec_format_error_reports_error_without_traceback(self) -> None:
+        command = Path(self.tmpdir.name) / "plain-exec"
+        command.write_text("echo hello\n", encoding="utf-8")
+        command.chmod(0o755)
 
         result = self.run_cli("with-lock", str(self.path), "--", str(command))
         self.assertEqual(result.returncode, core.EXIT_IO)

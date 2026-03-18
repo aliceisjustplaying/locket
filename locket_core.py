@@ -96,7 +96,8 @@ def read_text(path: Path) -> str:
 
 def read_token(path: Path) -> str | None:
     try:
-        return read_text(path).strip()
+        value = read_text(path).strip()
+        return value or None
     except FileNotFoundError:
         return None
 
@@ -262,6 +263,11 @@ def acquire(
             EXIT_USAGE,
         )
     if not path.parent.is_dir():
+        if path.parent.exists():
+            raise LockError(
+                f"Error: parent path is not a directory: {path.parent}",
+                EXIT_USAGE,
+            )
         raise LockError(
             f"Error: parent directory does not exist: {path.parent}",
             EXIT_USAGE,
@@ -320,8 +326,12 @@ def acquire(
                         raise LockError(f"Timed out waiting for lock: {path}", EXIT_TIMEOUT)
                 time.sleep(sleep_seconds)
                 continue
-            set_dir_mode(locket_dir, public_lock_dir_mode)
-            sync_dir(locket_dir.parent)
+            try:
+                set_dir_mode(locket_dir, public_lock_dir_mode)
+                sync_dir(locket_dir.parent)
+            except OSError:
+                shutil.rmtree(locket_dir, ignore_errors=True)
+                raise
             return LockHandle(path=path, token=token, metadata=metadata)
         except OSError as exc:
             shutil.rmtree(staging_dir, ignore_errors=True)
@@ -355,6 +365,12 @@ def status(path: Path) -> LockStatus:
     locket_dir = locket_dir_for(path)
     if not locket_dir.exists():
         return LockStatus(kind=StatusKind.UNLOCKED, path=path)
+    if locket_dir.exists() and not locket_dir.is_dir():
+        return LockStatus(
+            kind=StatusKind.CORRUPT,
+            path=path,
+            detail="lock path is not a directory",
+        )
     try:
         lock = _read_public_lock(path)
     except LockError as exc:

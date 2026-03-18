@@ -108,6 +108,21 @@ class CoreTests(unittest.TestCase):
         self.assertNotEqual(current.token, next_handle.token)
         core.release(self.path, next_handle.token)
 
+    def test_acquire_cleans_up_if_publish_step_fails(self) -> None:
+        locket_dir = core.locket_dir_for(self.path)
+
+        def fail_set_dir_mode(path: Path, mode: int) -> None:
+            if path == locket_dir:
+                raise OSError("chmod boom")
+            core.set_dir_mode(path, mode)
+
+        with self.assertRaises(core.LockError) as ctx:
+            with mock.patch.object(core, "set_dir_mode", side_effect=fail_set_dir_mode):
+                core.acquire(self.path)
+
+        self.assertEqual(ctx.exception.exit_code, core.EXIT_IO)
+        self.assertFalse(locket_dir.exists(), "failed acquire should not leave a live lock behind")
+        self.assertEqual(core.status(self.path).kind, core.StatusKind.UNLOCKED)
 
     def test_acquire_rejects_locket_suffix(self) -> None:
         target = Path(self.tmpdir.name) / "note.txt.locket"
@@ -120,6 +135,14 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(core.LockError) as ctx:
             core.acquire(target)
         self.assertIn("parent directory does not exist", str(ctx.exception))
+
+    def test_acquire_reports_parent_path_that_is_not_a_directory(self) -> None:
+        parent = Path(self.tmpdir.name) / "not-a-directory"
+        parent.write_text("hello\n", encoding="utf-8")
+        target = parent / "note.txt"
+        with self.assertRaises(core.LockError) as ctx:
+            core.acquire(target)
+        self.assertIn("not a directory", str(ctx.exception).lower())
 
     def test_acquire_rejects_locket_suffix_case_insensitive(self) -> None:
         for suffix in (".LOCKET", ".Locket", ".LoCkEt"):
@@ -134,6 +157,21 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(core.LockError) as ctx:
             core.acquire(target)
         self.assertIn(".locket", str(ctx.exception))
+
+    def test_status_reports_blank_token_file_as_corrupt(self) -> None:
+        lock_dir = self.path.parent / f"{self.path.name}.locket"
+        lock_dir.mkdir()
+        (lock_dir / core.TOKENFILE_NAME).write_text("\n", encoding="utf-8")
+        result = core.status(self.path)
+        self.assertEqual(result.kind, core.StatusKind.CORRUPT)
+
+    def test_release_rejects_blank_token_file(self) -> None:
+        lock_dir = self.path.parent / f"{self.path.name}.locket"
+        lock_dir.mkdir()
+        (lock_dir / core.TOKENFILE_NAME).write_text("\n", encoding="utf-8")
+        with self.assertRaises(core.LockError) as ctx:
+            core.release(self.path, "")
+        self.assertEqual(ctx.exception.exit_code, core.EXIT_BAD_LOCK)
 
 
 class CLITests(unittest.TestCase):
@@ -257,6 +295,25 @@ class CLITests(unittest.TestCase):
         result = self.run_cli("status", str(self.path))
         self.assertEqual(result.returncode, core.EXIT_BAD_LOCK)
         self.assertIn("Corrupt lock directory", result.stdout)
+
+    def test_status_reports_regular_file_at_lock_path_as_corrupt(self) -> None:
+        lock_path = self.path.parent / f"{self.path.name}.locket"
+        lock_path.write_text("not a directory\n", encoding="utf-8")
+        result = self.run_cli("status", str(self.path))
+        self.assertEqual(result.returncode, core.EXIT_BAD_LOCK)
+        self.assertIn("Corrupt lock directory", result.stdout)
+        self.assertEqual(result.stderr, "")
+
+    def test_with_lock_missing_executable_reports_error_without_traceback(self) -> None:
+        result = self.run_cli("with-lock", str(self.path), "--", "does-not-exist-cmd")
+        self.assertEqual(result.returncode, core.EXIT_IO)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("does-not-exist-cmd", result.stderr)
+
+        status = self.run_cli("status", str(self.path))
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+        self.assertIn("Unlocked:", status.stdout)
 
     def test_symlinked_cli_finds_core_module(self) -> None:
         symlink_dir = Path(self.tmpdir.name) / "bin"

@@ -15,6 +15,7 @@ from locket_core import (
     ABSOLUTE_ZERO_LOCK_DIR_MODE,
     DEFAULT_PUBLIC_LOCK_DIR_MODE,
     EXIT_BAD_LOCK,
+    EXIT_IO,
     LockError,
     StatusKind,
     acquire,
@@ -117,6 +118,9 @@ def cmd_with_lock(args: argparse.Namespace) -> int:
     try:
         completed = subprocess.run(command)
         exit_code = completed.returncode
+    except FileNotFoundError:
+        err(f"Error: command not found: {command[0]}")
+        exit_code = EXIT_IO
     finally:
         try:
             release(path, handle.token)

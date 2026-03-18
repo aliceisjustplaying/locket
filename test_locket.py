@@ -115,6 +115,12 @@ class CoreTests(unittest.TestCase):
             core.acquire(target)
         self.assertIn(".locket", str(ctx.exception))
 
+    def test_acquire_rejects_missing_parent_directory(self) -> None:
+        target = Path(self.tmpdir.name) / "nonexistent" / "note.txt"
+        with self.assertRaises(core.LockError) as ctx:
+            core.acquire(target)
+        self.assertIn("parent directory does not exist", str(ctx.exception))
+
     def test_acquire_rejects_locket_suffix_case_insensitive(self) -> None:
         for suffix in (".LOCKET", ".Locket", ".LoCkEt"):
             target = Path(self.tmpdir.name) / f"note.txt{suffix}"

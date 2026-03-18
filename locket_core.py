@@ -261,6 +261,11 @@ def acquire(
             f"Error: refusing to lock {path} (.locket is a reserved suffix)",
             EXIT_USAGE,
         )
+    if not path.parent.is_dir():
+        raise LockError(
+            f"Error: parent directory does not exist: {path.parent}",
+            EXIT_USAGE,
+        )
     if timeout is not None and timeout < 0:
         raise LockError("Error: --timeout must be non-negative", EXIT_USAGE)
 

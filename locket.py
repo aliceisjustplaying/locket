@@ -221,6 +221,8 @@ def main() -> int:
         if command and command[0] == "--":
             command = command[1:]
         if not command:
+            if "--" in sys.argv[2:]:
+                parser.error("with-lock requires a path before -- and a command after it")
             parser.error("with-lock requires a command after --")
         args.exec_argv = command
     if getattr(args, "exec_argv", None) == []:

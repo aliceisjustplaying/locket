@@ -148,6 +148,11 @@ class CLITests(unittest.TestCase):
         unlocked = self.run_cli("unlock", str(self.path), token)
         self.assertEqual(unlocked.returncode, 0, unlocked.stderr)
 
+    def test_with_lock_missing_path_mentions_separator_shape(self) -> None:
+        result = self.run_cli("with-lock", "--", "echo")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("requires a path before -- and a command after it", result.stderr)
+
     def test_lock_handoff_under_contention(self) -> None:
         worker_script = textwrap.dedent(
             f"""

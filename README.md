@@ -1,6 +1,6 @@
 # locket
 
-A tiny cooperative file lock for shared notes, docs, and other files that should only be read or edited by one process at a time.
+A tiny cooperative lock for canonical paths that represent shared notes, docs, and other resources that should only be read or edited by one process at a time.
 
 ```sh
 locket lock ~/notes/today.md -m "editing weekly summary"
@@ -19,6 +19,8 @@ locket unlock /Users/me/notes/today.md 1a2b3c4d
 - no dependencies
 - cooperative locking with a simple shell workflow
 - a small protocol layer under a thin CLI
+
+The target path does not need to exist yet. `locket` coordinates access to the canonical path name, so you can lock a file you plan to create later or a conceptual resource that your team has agreed to represent with a path.
 
 ## Install
 
@@ -88,11 +90,15 @@ locket status path/to/file
 # => Locked: /absolute/path/to/file (3m ago, updating project notes)
 ```
 
+The target path itself does not need to exist. The parent directory does, because `locket` stores the lock as a sibling `<path>.locket/` directory.
+
 ## Path resolution
 
-All paths are resolved to their absolute, canonical form before computing the lock directory. This means `locket lock ./notes.txt`, `locket lock notes.txt`, and `locket lock /full/path/to/notes.txt` all produce the same lock, as long as they refer to the same file. Symlinks are resolved too.
+All paths are resolved to their absolute, canonical form before computing the lock directory. This means `locket lock ./notes.txt`, `locket lock notes.txt`, and `locket lock /full/path/to/notes.txt` all produce the same lock, as long as they refer to the same canonical path. Symlinks are resolved too.
 
 The unlock command printed by `locket lock` always uses the resolved path, so you can copy and paste it directly.
+
+That also means `locket` works as a conceptual lock. If your team treats `/shared/plans/q2-launch.md` as the name of a work item, you can lock that path before the file exists and create it later under the same lock.
 
 ## Expected workflow
 
@@ -123,7 +129,7 @@ Do not edit anything inside `<path>.locket/` manually.
 
 ## How it works
 
-For a target file like `notes.txt`, `locket` uses a sibling directory:
+For a target path like `notes.txt`, `locket` uses a sibling directory:
 
 ```text
 notes.txt.locket/

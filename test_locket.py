@@ -146,6 +146,21 @@ class CLITests(unittest.TestCase):
             check=False,
         )
 
+    def test_lock_output_is_shell_safe_for_paths_with_spaces(self) -> None:
+        target = Path(self.tmpdir.name) / "path with spaces" / "note.txt"
+        target.parent.mkdir()
+        target.write_text("hello\n", encoding="utf-8")
+        result = self.run_cli("lock", str(target))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # the printed unlock command should be pasteable as-is
+        unlock_cmd = result.stdout.strip().removeprefix("Locked, when done run: ")
+        shell_result = subprocess.run(
+            unlock_cmd, shell=True, capture_output=True, text=True, cwd=REPO_ROOT
+        )
+        self.assertEqual(shell_result.returncode, 0, shell_result.stderr)
+        status = self.run_cli("status", str(target))
+        self.assertIn("Unlocked:", status.stdout)
+
     def test_with_lock_runs_command_and_releases(self) -> None:
         child = [
             sys.executable,

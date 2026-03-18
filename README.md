@@ -42,6 +42,12 @@ Acquire a lock. If another process already holds it, `locket` waits until it bec
 locket lock path/to/file
 ```
 
+Optionally stop waiting after a fixed amount of time:
+
+```sh
+locket lock path/to/file --timeout 30
+```
+
 Optionally tag the lock with a message:
 
 ```sh
@@ -112,7 +118,7 @@ notes.txt.locket/
   tag
 ```
 
-Lock acquisition is done by creating that directory. If it already exists, `locket` polls until it disappears.
+Lock acquisition is done by creating and syncing a fully initialized private directory, then atomically renaming it into place. If the public lock directory already exists, `locket` polls until it disappears.
 
 The unlock token is random and only printed to the caller. Unlock succeeds only when the provided token matches the one stored in the lock directory.
 
@@ -120,14 +126,14 @@ The tag file stores a JSON object with a UTC timestamp and an optional message (
 
 This is cooperative, not enforced. Any process can remove the lock directory directly. The token exists so that only the caller who acquired the lock has the value needed to release it through the normal CLI flow.
 
-## Orphaned locks
+## Corrupt locks
 
-If a process crashes between creating the lock directory and writing the token file, the result is an empty lock directory that nothing can unlock normally. `locket` detects this case:
+The public lock directory is only published after the token and tag files are fully written, so a missing `token` file is treated as corruption rather than a normal crash-recovery case. `locket` detects this state:
 
-- `locket lock` automatically reclaims an orphaned lock directory (one with no token file) instead of waiting forever.
-- `locket status` reports orphaned locks so you can see what happened.
+- `locket lock` fails instead of reclaiming it automatically.
+- `locket status` reports the lock directory as corrupt.
 
-This only covers the narrow crash window during lock acquisition. If a process crashes after the token is written, the lock stays held. That is by design: the token file means a caller received a token and may still be working.
+This is the conservative choice. Automatic reclaim can race with a lock holder that is still in the middle of publishing or retiring a lock. If a process crashes after the token is written, the lock stays held. That is by design: the token file means a caller received a token and may still be working.
 
 ## Output
 
@@ -136,7 +142,7 @@ Errors, status messages ("Waiting for lock", "Unlocked"), and diagnostics go to 
 ## Notes
 
 - Locks are advisory. They only help if every editor or script agrees to use `locket`.
-- `locket lock` has no timeout. It waits until the lock is available.
+- `locket lock` waits until the lock is available unless `--timeout` is set.
 - If you interrupt while waiting, no lock is taken.
 - If you lose the token, you cannot unlock that lock through the normal CLI flow.
 - This is best suited to local workflows and shared conventions, not access control or distributed consensus.

@@ -109,6 +109,27 @@ class CoreTests(unittest.TestCase):
         core.release(self.path, next_handle.token)
 
 
+    def test_acquire_rejects_locket_suffix(self) -> None:
+        target = Path(self.tmpdir.name) / "note.txt.locket"
+        with self.assertRaises(core.LockError) as ctx:
+            core.acquire(target)
+        self.assertIn(".locket", str(ctx.exception))
+
+    def test_acquire_rejects_locket_suffix_case_insensitive(self) -> None:
+        for suffix in (".LOCKET", ".Locket", ".LoCkEt"):
+            target = Path(self.tmpdir.name) / f"note.txt{suffix}"
+            with self.assertRaises(core.LockError, msg=f"should reject {suffix}"):
+                core.acquire(target)
+
+    def test_acquire_rejects_path_inside_locket_dir(self) -> None:
+        locket_dir = Path(self.tmpdir.name) / "note.txt.locket"
+        locket_dir.mkdir()
+        target = locket_dir / "nested"
+        with self.assertRaises(core.LockError) as ctx:
+            core.acquire(target)
+        self.assertIn(".locket", str(ctx.exception))
+
+
 class CLITests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory(prefix="locket-cli-test-")

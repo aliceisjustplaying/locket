@@ -254,6 +254,13 @@ def acquire(
     on_wait: Callable[[], None] | None = None,
     public_lock_dir_mode: int = DEFAULT_PUBLIC_LOCK_DIR_MODE,
 ) -> LockHandle:
+    if path.suffix.lower() == ".locket" or any(
+        p.suffix.lower() == ".locket" for p in path.parents
+    ):
+        raise LockError(
+            f"Error: refusing to lock {path} (.locket is a reserved suffix)",
+            EXIT_USAGE,
+        )
     if timeout is not None and timeout < 0:
         raise LockError("Error: --timeout must be non-negative", EXIT_USAGE)
 

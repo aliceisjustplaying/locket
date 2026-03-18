@@ -107,7 +107,7 @@ class CLITests(unittest.TestCase):
         ]
         result = self.run_cli("with-lock", str(self.path), "--", *child)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Unlocked:", result.stderr)
+        self.assertEqual(result.stderr, "")
         self.assertEqual(self.path.read_text(encoding="utf-8"), "updated\n")
         status = self.run_cli("status", str(self.path))
         self.assertEqual(status.stdout.strip().split(":")[0], "Unlocked")

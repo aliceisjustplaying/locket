@@ -113,7 +113,6 @@ def cmd_with_lock(args: argparse.Namespace) -> int:
         except LockError as exc:
             err(exc.message)
             exit_code = exc.exit_code
-        err(f"Unlocked: {path}")
     return exit_code
 
 

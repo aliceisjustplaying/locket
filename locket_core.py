@@ -68,7 +68,7 @@ class LockError(Exception):
 
 
 def resolve_path(raw: str) -> Path:
-    return Path(raw).resolve()
+    return Path(raw).expanduser().resolve()
 
 
 def locket_dir_for(path: Path) -> Path:
@@ -98,7 +98,7 @@ def read_token(path: Path) -> str | None:
     try:
         value = read_text(path).strip()
         return value or None
-    except FileNotFoundError:
+    except (FileNotFoundError, IsADirectoryError):
         return None
 
 
@@ -363,9 +363,9 @@ def release(path: Path, token: str) -> None:
 
 def status(path: Path) -> LockStatus:
     locket_dir = locket_dir_for(path)
-    if not locket_dir.exists():
+    if not locket_dir.exists() and not locket_dir.is_symlink():
         return LockStatus(kind=StatusKind.UNLOCKED, path=path)
-    if locket_dir.exists() and not locket_dir.is_dir():
+    if locket_dir.is_symlink() or not locket_dir.is_dir():
         return LockStatus(
             kind=StatusKind.CORRUPT,
             path=path,

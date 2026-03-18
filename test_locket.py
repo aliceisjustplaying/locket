@@ -158,10 +158,38 @@ class CoreTests(unittest.TestCase):
             core.acquire(target)
         self.assertIn(".locket", str(ctx.exception))
 
+    def test_resolve_path_expands_home_directory(self) -> None:
+        self.assertEqual(
+            core.resolve_path("~/note.txt"),
+            (Path.home() / "note.txt").resolve(),
+        )
+
+    def test_status_reports_broken_symlink_lock_path_as_corrupt(self) -> None:
+        lock_path = self.path.parent / f"{self.path.name}.locket"
+        lock_path.symlink_to(self.path.parent / "missing-lock-target")
+        result = core.status(self.path)
+        self.assertEqual(result.kind, core.StatusKind.CORRUPT)
+
+    def test_status_reports_symlinked_lock_directory_as_corrupt(self) -> None:
+        lock_path = self.path.parent / f"{self.path.name}.locket"
+        actual_lock_dir = self.path.parent / "actual-lock-dir"
+        actual_lock_dir.mkdir()
+        (actual_lock_dir / core.TOKENFILE_NAME).write_text("token\n", encoding="utf-8")
+        lock_path.symlink_to(actual_lock_dir, target_is_directory=True)
+        result = core.status(self.path)
+        self.assertEqual(result.kind, core.StatusKind.CORRUPT)
+
     def test_status_reports_blank_token_file_as_corrupt(self) -> None:
         lock_dir = self.path.parent / f"{self.path.name}.locket"
         lock_dir.mkdir()
         (lock_dir / core.TOKENFILE_NAME).write_text("\n", encoding="utf-8")
+        result = core.status(self.path)
+        self.assertEqual(result.kind, core.StatusKind.CORRUPT)
+
+    def test_status_reports_token_path_directory_as_corrupt(self) -> None:
+        lock_dir = self.path.parent / f"{self.path.name}.locket"
+        lock_dir.mkdir()
+        (lock_dir / core.TOKENFILE_NAME).mkdir()
         result = core.status(self.path)
         self.assertEqual(result.kind, core.StatusKind.CORRUPT)
 
@@ -310,6 +338,20 @@ class CLITests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertNotIn("Traceback", result.stderr)
         self.assertIn("does-not-exist-cmd", result.stderr)
+
+        status = self.run_cli("status", str(self.path))
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+        self.assertIn("Unlocked:", status.stdout)
+
+    def test_with_lock_non_executable_command_reports_error_without_traceback(self) -> None:
+        command = Path(self.tmpdir.name) / "not-executable.sh"
+        command.write_text("#!/bin/sh\necho hello\n", encoding="utf-8")
+
+        result = self.run_cli("with-lock", str(self.path), "--", str(command))
+        self.assertEqual(result.returncode, core.EXIT_IO)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(str(command), result.stderr)
 
         status = self.run_cli("status", str(self.path))
         self.assertEqual(status.returncode, 0, status.stdout + status.stderr)

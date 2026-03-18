@@ -121,6 +121,9 @@ def cmd_with_lock(args: argparse.Namespace) -> int:
     except FileNotFoundError:
         err(f"Error: command not found: {command[0]}")
         exit_code = EXIT_IO
+    except PermissionError:
+        err(f"Error: permission denied: {command[0]}")
+        exit_code = EXIT_IO
     finally:
         try:
             release(path, handle.token)

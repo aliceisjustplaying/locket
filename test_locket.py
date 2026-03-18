@@ -170,6 +170,13 @@ class CoreTests(unittest.TestCase):
         result = core.status(self.path)
         self.assertEqual(result.kind, core.StatusKind.CORRUPT)
 
+    def test_acquire_rejects_broken_symlink_lock_path_as_corrupt(self) -> None:
+        lock_path = self.path.parent / f"{self.path.name}.locket"
+        lock_path.symlink_to(self.path.parent / "missing-lock-target")
+        with self.assertRaises(core.LockError) as ctx:
+            core.acquire(self.path, timeout=0)
+        self.assertEqual(ctx.exception.exit_code, core.EXIT_BAD_LOCK)
+
     def test_status_reports_symlinked_lock_directory_as_corrupt(self) -> None:
         lock_path = self.path.parent / f"{self.path.name}.locket"
         actual_lock_dir = self.path.parent / "actual-lock-dir"
@@ -192,6 +199,21 @@ class CoreTests(unittest.TestCase):
         (lock_dir / core.TOKENFILE_NAME).mkdir()
         result = core.status(self.path)
         self.assertEqual(result.kind, core.StatusKind.CORRUPT)
+
+    def test_status_reports_invalid_utf8_token_as_corrupt(self) -> None:
+        lock_dir = self.path.parent / f"{self.path.name}.locket"
+        lock_dir.mkdir()
+        (lock_dir / core.TOKENFILE_NAME).write_bytes(b"\xff\n")
+        result = core.status(self.path)
+        self.assertEqual(result.kind, core.StatusKind.CORRUPT)
+
+    def test_status_ignores_invalid_utf8_tag(self) -> None:
+        lock_dir = self.path.parent / f"{self.path.name}.locket"
+        lock_dir.mkdir()
+        (lock_dir / core.TOKENFILE_NAME).write_text("abcd1234\n", encoding="utf-8")
+        (lock_dir / core.TAGFILE_NAME).write_bytes(b"\xff\n")
+        result = core.status(self.path)
+        self.assertEqual(result.kind, core.StatusKind.LOCKED)
 
     def test_release_rejects_blank_token_file(self) -> None:
         lock_dir = self.path.parent / f"{self.path.name}.locket"
@@ -332,6 +354,30 @@ class CLITests(unittest.TestCase):
         self.assertIn("Corrupt lock directory", result.stdout)
         self.assertEqual(result.stderr, "")
 
+    def test_status_with_naive_locked_at_reports_without_traceback(self) -> None:
+        lock_dir = self.path.parent / f"{self.path.name}.locket"
+        lock_dir.mkdir()
+        (lock_dir / core.TOKENFILE_NAME).write_text("abcd1234\n", encoding="utf-8")
+        (lock_dir / core.TAGFILE_NAME).write_text(
+            '{"locked_at": "2026-03-18T12:34:56", "user": "me"}\n',
+            encoding="utf-8",
+        )
+
+        result = self.run_cli("status", str(self.path))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Locked:", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_status_unknown_user_home_reports_usage_without_traceback(self) -> None:
+        result = self.run_cli(
+            "status",
+            "~definitely-no-such-user-12345/file.txt",
+        )
+        self.assertEqual(result.returncode, core.EXIT_USAGE)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("home directory", result.stderr.lower())
+
     def test_with_lock_missing_executable_reports_error_without_traceback(self) -> None:
         result = self.run_cli("with-lock", str(self.path), "--", "does-not-exist-cmd")
         self.assertEqual(result.returncode, core.EXIT_IO)
@@ -346,6 +392,21 @@ class CLITests(unittest.TestCase):
     def test_with_lock_non_executable_command_reports_error_without_traceback(self) -> None:
         command = Path(self.tmpdir.name) / "not-executable.sh"
         command.write_text("#!/bin/sh\necho hello\n", encoding="utf-8")
+
+        result = self.run_cli("with-lock", str(self.path), "--", str(command))
+        self.assertEqual(result.returncode, core.EXIT_IO)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(str(command), result.stderr)
+
+        status = self.run_cli("status", str(self.path))
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+        self.assertIn("Unlocked:", status.stdout)
+
+    def test_with_lock_command_under_file_path_reports_error_without_traceback(self) -> None:
+        not_a_directory = Path(self.tmpdir.name) / "not-a-directory"
+        not_a_directory.write_text("hello\n", encoding="utf-8")
+        command = not_a_directory / "child-command"
 
         result = self.run_cli("with-lock", str(self.path), "--", str(command))
         self.assertEqual(result.returncode, core.EXIT_IO)

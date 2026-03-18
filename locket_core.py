@@ -68,7 +68,13 @@ class LockError(Exception):
 
 
 def resolve_path(raw: str) -> Path:
-    return Path(raw).expanduser().resolve()
+    try:
+        return Path(raw).expanduser().resolve()
+    except (RuntimeError, KeyError):
+        raise LockError(
+            f"Error: could not resolve home directory in path: {raw}",
+            EXIT_USAGE,
+        )
 
 
 def locket_dir_for(path: Path) -> Path:
@@ -98,7 +104,7 @@ def read_token(path: Path) -> str | None:
     try:
         value = read_text(path).strip()
         return value or None
-    except (FileNotFoundError, IsADirectoryError):
+    except (FileNotFoundError, IsADirectoryError, UnicodeDecodeError):
         return None
 
 
@@ -180,7 +186,7 @@ def read_metadata(locket_dir: Path) -> LockMetadata | None:
         return None
     try:
         data = json.loads(read_text(tag_path))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
     if not isinstance(data, dict):
         return None
@@ -204,6 +210,8 @@ def format_metadata(metadata: LockMetadata) -> str:
     parts: list[str] = []
     try:
         dt = datetime.fromisoformat(metadata.locked_at)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         delta = datetime.now(timezone.utc) - dt
         seconds = max(0, int(delta.total_seconds()))
         if seconds < 60:
@@ -213,7 +221,7 @@ def format_metadata(metadata: LockMetadata) -> str:
         else:
             hours = seconds // 3600
             parts.append(f"{hours}h {(seconds % 3600) // 60}m ago")
-    except ValueError:
+    except (ValueError, TypeError):
         parts.append(metadata.locked_at)
     if metadata.message:
         parts.append(metadata.message)
@@ -276,6 +284,8 @@ def acquire(
         raise LockError("Error: --timeout must be non-negative", EXIT_USAGE)
 
     locket_dir = locket_dir_for(path)
+    if locket_dir.is_symlink() or (locket_dir.exists() and not locket_dir.is_dir()):
+        raise LockError(f"Error: corrupt lock directory for {path}", EXIT_BAD_LOCK)
     token = secrets.token_hex(4)
     metadata = build_metadata(message)
     deadline = None if timeout is None else time.monotonic() + timeout
@@ -306,7 +316,7 @@ def acquire(
                 except LockError as read_exc:
                     if read_exc.exit_code != EXIT_BAD_LOCK:
                         raise
-                    if not locket_dir.exists():
+                    if not locket_dir.exists() and not locket_dir.is_symlink():
                         continue
                     raise
                 if current is None:

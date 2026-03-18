@@ -124,6 +124,9 @@ def cmd_with_lock(args: argparse.Namespace) -> int:
     except PermissionError:
         err(f"Error: permission denied: {command[0]}")
         exit_code = EXIT_IO
+    except NotADirectoryError:
+        err(f"Error: not a directory in command path: {command[0]}")
+        exit_code = EXIT_IO
     finally:
         try:
             release(path, handle.token)
@@ -234,7 +237,11 @@ def main() -> int:
         args.exec_argv = command
     if getattr(args, "exec_argv", None) == []:
         parser.error("with-lock requires a command after --")
-    return args.func(args)
+    try:
+        return args.func(args)
+    except LockError as exc:
+        err(exc.message)
+        return exc.exit_code
 
 
 if __name__ == "__main__":

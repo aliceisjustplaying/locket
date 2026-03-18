@@ -1,33 +1,75 @@
 # locket
 
-A tiny cooperative lock for canonical paths that represent shared notes, docs, and other resources that should only be read or edited by one process at a time.
+Cooperative locks for shared notes, plans, and other path-shaped resources.
 
 ```sh
 locket lock ~/notes/today.md -m "editing weekly summary"
-# => Locked, when done run: locket unlock /Users/me/notes/today.md 1a2b3c4d
-
-# read and edit the original file directly
-$EDITOR ~/notes/today.md
-
+# ... read and edit the resource ...
 locket unlock /Users/me/notes/today.md 1a2b3c4d
 ```
 
-`locket` is intentionally small:
+`locket` locks canonical path names. The target path does not need to exist yet, so it works for both real files and conceptual resources that your team agrees to represent with a path.
 
-- a small codebase
-- no daemon
-- no dependencies
-- cooperative locking with a simple shell workflow
-- a small protocol layer under a thin CLI
+Especially useful in agent workflows where multiple shells or tools need a shared convention for who is actively working on a resource. Think of it as lockout-tagout for shared files: visible, conventional, not a security boundary.
 
-The target path does not need to exist yet. `locket` coordinates access to the canonical path name, so you can lock a file you plan to create later or a conceptual resource that your team has agreed to represent with a path.
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `lock` | Acquire a lock (waits until available) |
+| `unlock` | Release a lock using its token |
+| `status` | Inspect current lock state |
+| `with-lock` | Run a command while holding a lock |
+
+## Usage
+
+Acquire a lock and unlock it later:
+
+```sh
+locket lock path/to/file
+# => Locked, when done run: locket unlock /absolute/path/to/file 1a2b3c4d
+
+locket unlock /absolute/path/to/file 1a2b3c4d
+```
+
+Tag the lock with a message:
+
+```sh
+locket lock path/to/file -m "updating project notes"
+```
+
+Stop waiting after a fixed amount of time:
+
+```sh
+locket lock path/to/file -t 30
+```
+
+Run a command while holding the lock:
+
+```sh
+locket with-lock path/to/file -- make format
+```
+
+Inspect lock state:
+
+```sh
+locket status path/to/file
+# => Locked: /absolute/path/to/file (3s ago, updating project notes, user@host pid=12345)
+```
+
+Use a path as a coordination point, even if no file is involved:
+
+```sh
+locket lock db-migration
+```
+
+The parent directory must exist, because `locket` stores a sibling `<path>.locket/` directory next to the target path.
 
 ## Install
 
 Requires Python 3.10+.
 
 ```sh
-chmod +x locket.py
 ln -s "$(pwd)/locket.py" /usr/local/bin/locket
 ```
 
@@ -37,155 +79,32 @@ Or run it directly:
 ./locket.py lock path/to/file
 ```
 
-## Usage
-
-Acquire a lock. If another process already holds it, `locket` waits until it becomes available.
-
-```sh
-locket lock path/to/file
-```
-
-Optionally stop waiting after a fixed amount of time:
-
-```sh
-locket lock path/to/file --timeout 30
-```
-
-Short form:
-
-```sh
-locket lock path/to/file -t 30
-```
-
-By default, the published `.locket` directory is chmodded to `555` for friction without making it unreadable. If you want the harsher `000` marker instead, opt in with:
-
-```sh
-locket lock path/to/file --absolute-zero
-```
-
-Optionally tag the lock with a message:
-
-```sh
-locket lock path/to/file -m "updating project notes"
-```
-
-Example output:
-
-```sh
-Locked, when done run: locket unlock /absolute/path/to/file 1a2b3c4d
-```
-
-Release the lock with the exact token that was printed:
-
-```sh
-locket unlock /absolute/path/to/file 1a2b3c4d
-```
-
-If the token is wrong, unlock fails.
-
-Run a command while holding the lock:
-
-```sh
-locket with-lock path/to/file -- make format
-```
-
-Check whether a file is locked:
-
-```sh
-locket status path/to/file
-# => Locked: /absolute/path/to/file (3m ago, updating project notes)
-```
-
-The target path itself does not need to exist. The parent directory does, because `locket` stores the lock as a sibling `<path>.locket/` directory.
-
-## Path resolution
-
-All paths are resolved to their absolute, canonical form before computing the lock directory. This means `locket lock ./notes.txt`, `locket lock notes.txt`, and `locket lock /full/path/to/notes.txt` all produce the same lock, as long as they refer to the same canonical path. Symlinks are resolved too.
-
-The unlock command printed by `locket lock` always uses the resolved path, so you can copy and paste it directly.
-
-That also means `locket` works as a conceptual lock. If your team treats `/shared/plans/q2-launch.md` as the name of a work item, you can lock that path before the file exists and create it later under the same lock.
-
-## Expected workflow
-
-1. `locket lock <path>`
-2. Read the original file at `<path>`
-3. Edit the original file at `<path>`
-4. Run the printed `locket unlock <path> <token>` command when done
-
-The lock comes before the read. The intended lifecycle is:
-
-```text
-lock
-read
-edit
-unlock
-```
-
-Not:
-
-```text
-read
-lock
-edit
-unlock
-```
-
-Do not edit anything inside `<path>.locket/` manually.
-
 ## How it works
 
 For a target path like `notes.txt`, `locket` uses a sibling directory:
 
 ```text
 notes.txt.locket/
-  token
-  tag
+  token   # opaque unlock secret
+  tag     # JSON: timestamp, message, pid, user, host
 ```
 
-Lock acquisition is done by creating and syncing a fully initialized private directory, then atomically renaming it into place. If the public lock directory already exists, `locket` polls until it disappears.
+All paths are resolved to their absolute, canonical form (including symlinks) before computing the lock directory. That means `./notes.txt`, `notes.txt`, and `/full/path/to/notes.txt` all refer to the same lock.
 
-After publication, `locket` chmods the public `.locket` directory to `555` by default. That leaves it readable and traversable but not writable, which makes casual tampering noisier without turning the directory into an unreadable obstacle for shell prompts and other tooling. If you pass `--absolute-zero`, `locket` uses `000` instead. Both modes are only friction, not security: the same user can still chmod the directory back or delete it through the parent directory.
+Lock acquisition creates the directory atomically via rename. Unlock renames it away before removing it. The intended lifecycle is lock, read, edit, unlock - always lock *before* reading.
 
-The unlock token is random and only printed to the caller. Unlock succeeds only when the provided token matches the one stored in the lock directory.
+`locket lock` prints the unlock command (including the token) to stdout. Errors and status messages go to stderr, so scripts can capture the token cleanly.
 
-The tag file stores a JSON object with a UTC timestamp and an optional message (from `-m`). This is the "tagout" part: anyone who encounters a lock can run `locket status` to see when it was taken and why, without needing the token.
+## Agents
 
-The tag also records the owner PID, username, and hostname when available. That keeps `status` useful when multiple shells or machines share the same convention.
-
-This is cooperative, not enforced. Any process can remove the lock directory directly. The token exists so that only the caller who acquired the lock has the value needed to release it through the normal CLI flow.
-
-## Corrupt locks
-
-The public lock directory is only published after the token and tag files are fully written, so a missing `token` file is treated as corruption rather than a normal crash-recovery case. `locket` detects this state:
-
-- `locket lock` fails instead of reclaiming it automatically.
-- `locket status` reports the lock directory as corrupt.
-
-This is the conservative choice. Automatic reclaim can race with a lock holder that is still in the middle of publishing or retiring a lock. If a process crashes after the token is written, the lock stays held. That is by design: the token file means a caller received a token and may still be working.
-
-Transient disappearance of the public lock directory during a normal unlock is treated as a concurrent handoff, not as corruption. That keeps `lock` and `status` stable under contention.
-
-When `locket status` or `locket unlock` needs to inspect the public lock directory, it temporarily relaxes the directory mode and then restores it. If a process ignores `locket`, it can still bypass that friction.
-
-## Output
-
-Errors, status messages ("Waiting for lock", "Unlocked"), and diagnostics go to stderr. The `locket lock` command prints the unlock command (containing the token) to stdout, so programmatic callers can capture it without parsing around other output.
+If you want to teach agents how to use `locket`, see [AGENTS.md](AGENTS.md). It contains a reusable instruction block covering canonical path locks, coordination points, `with-lock`, and the `--absolute-zero` caveat.
 
 ## Notes
 
 - Locks are advisory. They only help if every editor or script agrees to use `locket`.
-- `locket lock` waits until the lock is available unless `--timeout` is set.
+- `locket lock` waits until available unless `-t` / `--timeout` is set.
 - If you interrupt while waiting, no lock is taken.
-- If you lose the token, you cannot unlock that lock through the normal CLI flow.
-- This is best suited to local workflows and shared conventions, not access control or distributed consensus.
-
-## Help
-
-```sh
-locket --help
-locket lock --help
-locket unlock --help
-locket status --help
-locket with-lock --help
-```
+- If you lose the token, you cannot unlock through the normal CLI flow.
+- The `.locket` directory is chmodded to `555` by default. Pass `--absolute-zero` for `000` instead. Both are friction, not security.
+- A missing `token` file in a `.locket` directory is treated as corruption, not a reclaimable lock. Use `locket status` to inspect.
+- This is for coordination, not access control or distributed consensus.

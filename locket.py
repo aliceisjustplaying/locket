@@ -12,6 +12,8 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from locket_core import (
+    ABSOLUTE_ZERO_LOCK_DIR_MODE,
+    DEFAULT_PUBLIC_LOCK_DIR_MODE,
     EXIT_BAD_LOCK,
     LockError,
     StatusKind,
@@ -31,6 +33,12 @@ def format_unlock_command(path: str, token: str) -> str:
     return f"locket unlock {shlex.quote(path)} {shlex.quote(token)}"
 
 
+def selected_public_lock_mode(args: argparse.Namespace) -> int:
+    if getattr(args, "absolute_zero", False):
+        return ABSOLUTE_ZERO_LOCK_DIR_MODE
+    return DEFAULT_PUBLIC_LOCK_DIR_MODE
+
+
 def cmd_lock(args: argparse.Namespace) -> int:
     path = resolve_path(args.path)
     try:
@@ -39,6 +47,7 @@ def cmd_lock(args: argparse.Namespace) -> int:
             timeout=args.timeout,
             message=getattr(args, "message", None),
             on_wait=lambda: err(f"Waiting for lock: {path}"),
+            public_lock_dir_mode=selected_public_lock_mode(args),
         )
     except KeyboardInterrupt:
         err(f"Interrupted while waiting for lock: {path}")
@@ -95,6 +104,7 @@ def cmd_with_lock(args: argparse.Namespace) -> int:
             timeout=args.timeout,
             message=args.message,
             on_wait=lambda: err(f"Waiting for lock: {path}"),
+            public_lock_dir_mode=selected_public_lock_mode(args),
         )
     except KeyboardInterrupt:
         err(f"Interrupted while waiting for lock: {path}")
@@ -147,6 +157,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="stop waiting after SECONDS instead of blocking forever",
     )
+    lock_parser.add_argument(
+        "--absolute-zero",
+        action="store_true",
+        help="chmod the public lock directory to 000 instead of the default 555",
+    )
     lock_parser.set_defaults(func=cmd_lock)
 
     unlock_parser = subparsers.add_parser(
@@ -178,6 +193,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout",
         type=float,
         help="stop waiting after SECONDS instead of blocking forever",
+    )
+    with_lock_parser.add_argument(
+        "--absolute-zero",
+        action="store_true",
+        help="chmod the public lock directory to 000 instead of the default 555",
     )
     with_lock_parser.add_argument(
         "exec_argv",

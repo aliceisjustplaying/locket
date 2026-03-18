@@ -51,6 +51,32 @@ class CoreTests(unittest.TestCase):
             core.release(self.path, handle.token + "x")
         self.assertEqual(ctx.exception.exit_code, core.EXIT_BAD_LOCK)
 
+    def test_acquire_locks_down_public_dir_permissions(self) -> None:
+        handle = core.acquire(self.path)
+        locket_dir = core.locket_dir_for(self.path)
+        self.assertEqual(core.current_mode(locket_dir), core.DEFAULT_PUBLIC_LOCK_DIR_MODE)
+        core.release(self.path, handle.token)
+
+    def test_status_restores_public_dir_permissions(self) -> None:
+        handle = core.acquire(self.path)
+        locket_dir = core.locket_dir_for(self.path)
+        result = core.status(self.path)
+        self.assertEqual(result.kind, core.StatusKind.LOCKED)
+        self.assertEqual(core.current_mode(locket_dir), core.DEFAULT_PUBLIC_LOCK_DIR_MODE)
+        core.release(self.path, handle.token)
+
+    def test_absolute_zero_mode_is_restored_after_status(self) -> None:
+        handle = core.acquire(
+            self.path,
+            public_lock_dir_mode=core.ABSOLUTE_ZERO_LOCK_DIR_MODE,
+        )
+        locket_dir = core.locket_dir_for(self.path)
+        self.assertEqual(core.current_mode(locket_dir), core.ABSOLUTE_ZERO_LOCK_DIR_MODE)
+        result = core.status(self.path)
+        self.assertEqual(result.kind, core.StatusKind.LOCKED)
+        self.assertEqual(core.current_mode(locket_dir), core.ABSOLUTE_ZERO_LOCK_DIR_MODE)
+        core.release(self.path, handle.token)
+
     def test_acquire_retries_when_lock_disappears_during_handoff(self) -> None:
         current = core.acquire(self.path)
         locket_dir = core.locket_dir_for(self.path)
@@ -68,7 +94,8 @@ class CoreTests(unittest.TestCase):
                     return original_rename(src, dst)
                 except OSError:
                     retiring_dir = core.private_locket_dir(locket_dir, "retiring-test")
-                    original_rename(locket_dir, retiring_dir)
+                    with core.temporarily_open_public_lock(locket_dir):
+                        original_rename(locket_dir, retiring_dir)
                     import shutil
 
                     shutil.rmtree(retiring_dir)
@@ -111,6 +138,15 @@ class CLITests(unittest.TestCase):
         self.assertEqual(self.path.read_text(encoding="utf-8"), "updated\n")
         status = self.run_cli("status", str(self.path))
         self.assertEqual(status.stdout.strip().split(":")[0], "Unlocked")
+
+    def test_lock_absolute_zero_sets_public_dir_mode(self) -> None:
+        locked = self.run_cli("lock", str(self.path), "--absolute-zero")
+        self.assertEqual(locked.returncode, 0, locked.stderr)
+        token = locked.stdout.strip().split()[-1]
+        lock_dir = self.path.parent / f"{self.path.name}.locket"
+        self.assertEqual(core.current_mode(lock_dir), core.ABSOLUTE_ZERO_LOCK_DIR_MODE)
+        unlocked = self.run_cli("unlock", str(self.path), token)
+        self.assertEqual(unlocked.returncode, 0, unlocked.stderr)
 
     def test_lock_handoff_under_contention(self) -> None:
         worker_script = textwrap.dedent(

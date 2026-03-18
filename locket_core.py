@@ -7,8 +7,10 @@ import os
 import secrets
 import shutil
 import socket
+import stat
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -23,6 +25,9 @@ EXIT_IO = 4
 TOKENFILE_NAME = "token"
 TAGFILE_NAME = "tag"
 POLL_SECONDS = 0.1
+PRIVATE_LOCK_DIR_MODE = 0o700
+DEFAULT_PUBLIC_LOCK_DIR_MODE = 0o555
+ABSOLUTE_ZERO_LOCK_DIR_MODE = 0o000
 
 
 class StatusKind(str, Enum):
@@ -106,6 +111,35 @@ def sync_dir(path: Path) -> None:
 
 def private_locket_dir(locket_dir: Path, phase: str) -> Path:
     return locket_dir.parent / f".{locket_dir.name}.{phase}.{secrets.token_hex(8)}"
+
+
+def current_mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def set_dir_mode(path: Path, mode: int) -> None:
+    os.chmod(path, mode)
+
+
+@contextmanager
+def temporarily_open_public_lock(locket_dir: Path):
+    try:
+        original_mode = current_mode(locket_dir)
+    except FileNotFoundError:
+        yield False
+        return
+
+    changed = original_mode != PRIVATE_LOCK_DIR_MODE
+    if changed:
+        set_dir_mode(locket_dir, PRIVATE_LOCK_DIR_MODE)
+    try:
+        yield True
+    finally:
+        if changed:
+            try:
+                set_dir_mode(locket_dir, original_mode)
+            except FileNotFoundError:
+                pass
 
 
 def build_metadata(message: str | None) -> LockMetadata:
@@ -195,19 +229,22 @@ def format_metadata(metadata: LockMetadata) -> str:
 
 def _read_public_lock(path: Path) -> LockHandle | None:
     locket_dir = locket_dir_for(path)
-    token_path = token_file_for(locket_dir)
-    try:
-        token = read_token(token_path)
-    except OSError as exc:
-        raise LockError(f"Error: could not read lock for {path}: {exc}", EXIT_IO) from exc
-    if token is None:
-        if locket_dir.exists():
-            raise LockError(f"Error: corrupt lock directory for {path}", EXIT_BAD_LOCK)
-        return None
-    metadata = read_metadata(locket_dir)
-    if metadata is None:
-        metadata = LockMetadata(locked_at="")
-    return LockHandle(path=path, token=token, metadata=metadata)
+    with temporarily_open_public_lock(locket_dir) as present:
+        if not present:
+            return None
+        token_path = token_file_for(locket_dir)
+        try:
+            token = read_token(token_path)
+        except OSError as exc:
+            raise LockError(f"Error: could not read lock for {path}: {exc}", EXIT_IO) from exc
+        if token is None:
+            if locket_dir.exists():
+                raise LockError(f"Error: corrupt lock directory for {path}", EXIT_BAD_LOCK)
+            return None
+        metadata = read_metadata(locket_dir)
+        if metadata is None:
+            metadata = LockMetadata(locked_at="")
+        return LockHandle(path=path, token=token, metadata=metadata)
 
 
 def acquire(
@@ -215,6 +252,7 @@ def acquire(
     timeout: float | None = None,
     message: str | None = None,
     on_wait: Callable[[], None] | None = None,
+    public_lock_dir_mode: int = DEFAULT_PUBLIC_LOCK_DIR_MODE,
 ) -> LockHandle:
     if timeout is not None and timeout < 0:
         raise LockError("Error: --timeout must be non-negative", EXIT_USAGE)
@@ -228,7 +266,7 @@ def acquire(
     while True:
         staging_dir = private_locket_dir(locket_dir, "staging")
         try:
-            staging_dir.mkdir(mode=0o700)
+            staging_dir.mkdir(mode=PRIVATE_LOCK_DIR_MODE)
             sync_dir(staging_dir.parent)
             write_text(token_file_for(staging_dir), token + "\n")
             write_metadata(staging_dir, metadata)
@@ -236,7 +274,13 @@ def acquire(
             try:
                 staging_dir.rename(locket_dir)
             except OSError as exc:
-                if exc.errno not in (errno.EEXIST, errno.ENOTEMPTY):
+                lock_collision = exc.errno in (
+                    errno.EEXIST,
+                    errno.ENOTEMPTY,
+                    errno.EACCES,
+                    errno.EPERM,
+                )
+                if not lock_collision:
                     raise
                 shutil.rmtree(staging_dir, ignore_errors=True)
                 try:
@@ -264,6 +308,7 @@ def acquire(
                         raise LockError(f"Timed out waiting for lock: {path}", EXIT_TIMEOUT)
                 time.sleep(sleep_seconds)
                 continue
+            set_dir_mode(locket_dir, public_lock_dir_mode)
             sync_dir(locket_dir.parent)
             return LockHandle(path=path, token=token, metadata=metadata)
         except OSError as exc:
@@ -281,7 +326,10 @@ def release(path: Path, token: str) -> None:
     locket_dir = locket_dir_for(path)
     retiring_dir = private_locket_dir(locket_dir, "retiring")
     try:
-        locket_dir.rename(retiring_dir)
+        with temporarily_open_public_lock(locket_dir) as present:
+            if not present:
+                raise LockError(f"Error: no active lock for {path}", EXIT_BAD_LOCK)
+            locket_dir.rename(retiring_dir)
         sync_dir(retiring_dir.parent)
         shutil.rmtree(retiring_dir)
         sync_dir(retiring_dir.parent)

@@ -57,6 +57,12 @@ Short form:
 locket lock path/to/file -t 30
 ```
 
+By default, the published `.locket` directory is chmodded to `555` for friction without making it unreadable. If you want the harsher `000` marker instead, opt in with:
+
+```sh
+locket lock path/to/file --absolute-zero
+```
+
 Optionally tag the lock with a message:
 
 ```sh
@@ -139,6 +145,8 @@ notes.txt.locket/
 
 Lock acquisition is done by creating and syncing a fully initialized private directory, then atomically renaming it into place. If the public lock directory already exists, `locket` polls until it disappears.
 
+After publication, `locket` chmods the public `.locket` directory to `555` by default. That leaves it readable and traversable but not writable, which makes casual tampering noisier without turning the directory into an unreadable obstacle for shell prompts and other tooling. If you pass `--absolute-zero`, `locket` uses `000` instead. Both modes are only friction, not security: the same user can still chmod the directory back or delete it through the parent directory.
+
 The unlock token is random and only printed to the caller. Unlock succeeds only when the provided token matches the one stored in the lock directory.
 
 The tag file stores a JSON object with a UTC timestamp and an optional message (from `-m`). This is the "tagout" part: anyone who encounters a lock can run `locket status` to see when it was taken and why, without needing the token.
@@ -157,6 +165,8 @@ The public lock directory is only published after the token and tag files are fu
 This is the conservative choice. Automatic reclaim can race with a lock holder that is still in the middle of publishing or retiring a lock. If a process crashes after the token is written, the lock stays held. That is by design: the token file means a caller received a token and may still be working.
 
 Transient disappearance of the public lock directory during a normal unlock is treated as a concurrent handoff, not as corruption. That keeps `lock` and `status` stable under contention.
+
+When `locket status` or `locket unlock` needs to inspect the public lock directory, it temporarily relaxes the directory mode and then restores it. If a process ignores `locket`, it can still bypass that friction.
 
 ## Output
 

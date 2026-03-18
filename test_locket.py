@@ -328,6 +328,23 @@ class CoreTests(unittest.TestCase):
             core.release(self.path, "")
         self.assertEqual(ctx.exception.exit_code, core.EXIT_BAD_LOCK)
 
+    def test_status_wraps_permission_error_opening_public_lock(self) -> None:
+        handle = core.acquire(self.path)
+        locket_dir = core.locket_dir_for(self.path)
+        original_set_dir_mode = core.set_dir_mode
+
+        def fail_set_dir_mode(path: Path, mode: int) -> None:
+            if path == locket_dir and mode == core.PRIVATE_LOCK_DIR_MODE:
+                raise PermissionError("chmod denied")
+            return original_set_dir_mode(path, mode)
+
+        with mock.patch.object(core, "set_dir_mode", side_effect=fail_set_dir_mode):
+            with self.assertRaises(core.LockError) as ctx:
+                core.status(self.path)
+
+        self.assertEqual(ctx.exception.exit_code, core.EXIT_IO)
+        core.release(self.path, handle.token)
+
 
 class CLITests(unittest.TestCase):
     def setUp(self) -> None:
@@ -576,6 +593,27 @@ class CLITests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertNotIn("Traceback", result.stderr)
         self.assertIn(str(command), result.stderr)
+
+        status = self.run_cli("status", str(self.path))
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+        self.assertIn("Unlocked:", status.stdout)
+
+    def test_with_lock_maps_signaled_child_exit_code_and_releases(self) -> None:
+        import signal
+
+        child = [
+            sys.executable,
+            "-c",
+            "import os, signal; os.kill(os.getpid(), signal.SIGTERM)",
+        ]
+
+        result = self.run_cli("with-lock", str(self.path), "--", *child)
+
+        self.assertEqual(
+            result.returncode,
+            128 + signal.SIGTERM,
+            result.stdout + result.stderr,
+        )
 
         status = self.run_cli("status", str(self.path))
         self.assertEqual(status.returncode, 0, status.stdout + status.stderr)

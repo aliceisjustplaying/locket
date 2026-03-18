@@ -118,6 +118,8 @@ def cmd_with_lock(args: argparse.Namespace) -> int:
     try:
         completed = subprocess.run(command)
         exit_code = completed.returncode
+        if exit_code < 0:
+            exit_code = 128 + abs(exit_code)
     except FileNotFoundError:
         err(f"Error: command not found: {command[0]}")
         exit_code = EXIT_IO

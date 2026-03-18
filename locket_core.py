@@ -149,17 +149,26 @@ def temporarily_open_public_lock(locket_dir: Path):
     except FileNotFoundError:
         yield False
         return
+    except PermissionError as exc:
+        raise LockError(
+            f"Error: cannot read lock directory {locket_dir}: {exc}", EXIT_IO
+        ) from exc
 
     changed = original_mode != PRIVATE_LOCK_DIR_MODE
     if changed:
-        set_dir_mode(locket_dir, PRIVATE_LOCK_DIR_MODE)
+        try:
+            set_dir_mode(locket_dir, PRIVATE_LOCK_DIR_MODE)
+        except PermissionError as exc:
+            raise LockError(
+                f"Error: cannot open lock directory {locket_dir}: {exc}", EXIT_IO
+            ) from exc
     try:
         yield True
     finally:
         if changed:
             try:
                 set_dir_mode(locket_dir, original_mode)
-            except FileNotFoundError:
+            except (FileNotFoundError, PermissionError):
                 pass
 
 

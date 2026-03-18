@@ -14,14 +14,15 @@ locket unlock /Users/me/notes/today.md 1a2b3c4d
 
 `locket` is intentionally small:
 
-- one file
+- a small codebase
 - no daemon
 - no dependencies
 - cooperative locking with a simple shell workflow
+- a small protocol layer under a thin CLI
 
 ## Install
 
-Requires Python 3.7+.
+Requires Python 3.10+.
 
 ```sh
 chmod +x locket.py
@@ -48,6 +49,12 @@ Optionally stop waiting after a fixed amount of time:
 locket lock path/to/file --timeout 30
 ```
 
+Short form:
+
+```sh
+locket lock path/to/file -t 30
+```
+
 Optionally tag the lock with a message:
 
 ```sh
@@ -67,6 +74,12 @@ locket unlock /absolute/path/to/file 1a2b3c4d
 ```
 
 If the token is wrong, unlock fails.
+
+Run a command while holding the lock:
+
+```sh
+locket with-lock path/to/file -- make format
+```
 
 Check whether a file is locked:
 
@@ -124,6 +137,8 @@ The unlock token is random and only printed to the caller. Unlock succeeds only 
 
 The tag file stores a JSON object with a UTC timestamp and an optional message (from `-m`). This is the "tagout" part: anyone who encounters a lock can run `locket status` to see when it was taken and why, without needing the token.
 
+The tag also records the owner PID, username, and hostname when available. That keeps `status` useful when multiple shells or machines share the same convention.
+
 This is cooperative, not enforced. Any process can remove the lock directory directly. The token exists so that only the caller who acquired the lock has the value needed to release it through the normal CLI flow.
 
 ## Corrupt locks
@@ -134,6 +149,8 @@ The public lock directory is only published after the token and tag files are fu
 - `locket status` reports the lock directory as corrupt.
 
 This is the conservative choice. Automatic reclaim can race with a lock holder that is still in the middle of publishing or retiring a lock. If a process crashes after the token is written, the lock stays held. That is by design: the token file means a caller received a token and may still be working.
+
+Transient disappearance of the public lock directory during a normal unlock is treated as a concurrent handoff, not as corruption. That keeps `lock` and `status` stable under contention.
 
 ## Output
 
@@ -154,4 +171,5 @@ locket --help
 locket lock --help
 locket unlock --help
 locket status --help
+locket with-lock --help
 ```

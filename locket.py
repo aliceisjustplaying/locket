@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shlex
 import subprocess
 import sys
@@ -49,6 +50,7 @@ def cmd_lock(args: argparse.Namespace) -> int:
             message=getattr(args, "message", None),
             on_wait=lambda: err(f"Waiting for lock: {path}"),
             public_lock_dir_mode=selected_public_lock_mode(args),
+            holder_pid=getattr(args, "holder_pid", None),
         )
     except KeyboardInterrupt:
         err(f"Interrupted while waiting for lock: {path}")
@@ -106,6 +108,7 @@ def cmd_with_lock(args: argparse.Namespace) -> int:
             message=args.message,
             on_wait=lambda: err(f"Waiting for lock: {path}"),
             public_lock_dir_mode=selected_public_lock_mode(args),
+            holder_pid=os.getpid(),  # locket process IS the holder for with-lock
         )
     except KeyboardInterrupt:
         err(f"Interrupted while waiting for lock: {path}")
@@ -176,6 +179,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--absolute-zero",
         action="store_true",
         help="chmod the public lock directory to 000 instead of the default 555",
+    )
+    lock_parser.add_argument(
+        "--holder-pid",
+        type=int,
+        help="PID of the process that holds the lock (default: parent PID). "
+        "Use $$ in shell scripts to pass the script's own PID.",
     )
     lock_parser.set_defaults(func=cmd_lock)
 

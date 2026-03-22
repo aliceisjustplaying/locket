@@ -41,6 +41,7 @@ class LockMetadata:
     locked_at: str
     message: str | None = None
     pid: int | None = None
+    locker_pid: int | None = None
     user: str | None = None
     host: str | None = None
 
@@ -172,7 +173,7 @@ def temporarily_open_public_lock(locket_dir: Path):
                 pass
 
 
-def build_metadata(message: str | None) -> LockMetadata:
+def build_metadata(message: str | None, holder_pid: int | None = None) -> LockMetadata:
     try:
         user = getpass.getuser()
     except OSError:
@@ -184,7 +185,8 @@ def build_metadata(message: str | None) -> LockMetadata:
     return LockMetadata(
         locked_at=datetime.now(timezone.utc).isoformat(),
         message=message,
-        pid=os.getpid(),
+        pid=holder_pid if holder_pid is not None else os.getppid(),
+        locker_pid=os.getpid(),
         user=user,
         host=host,
     )
@@ -196,6 +198,8 @@ def write_metadata(locket_dir: Path, metadata: LockMetadata) -> None:
         payload["message"] = metadata.message
     if metadata.pid is not None:
         payload["pid"] = metadata.pid
+    if metadata.locker_pid is not None:
+        payload["locker_pid"] = metadata.locker_pid
     if metadata.user:
         payload["user"] = metadata.user
     if metadata.host:
@@ -218,15 +222,48 @@ def read_metadata(locket_dir: Path) -> LockMetadata | None:
         return None
     message = data.get("message")
     pid = data.get("pid")
+    locker_pid = data.get("locker_pid")
     user = data.get("user")
     host = data.get("host")
     return LockMetadata(
         locked_at=locked_at,
         message=message if isinstance(message, str) else None,
         pid=pid if isinstance(pid, int) else None,
+        locker_pid=locker_pid if isinstance(locker_pid, int) else None,
         user=user if isinstance(user, str) else None,
         host=host if isinstance(host, str) else None,
     )
+
+
+def _is_lock_stale(metadata: LockMetadata) -> bool:
+    """Check if a lock is stale by testing whether the holder process is alive.
+
+    The lock records the PID of the process that called `locket lock` (the
+    parent of the locket CLI process). If that process is no longer running,
+    the lock is stale.
+
+    Returns False (not stale) if:
+    - No PID was recorded
+    - The lock is from a different host (can't check remote PIDs)
+    - The process is still alive
+    - We lack permission to signal the process (it exists but is owned by
+      another user)
+    """
+    if metadata.pid is None or metadata.pid <= 0:
+        return False  # can't check without a valid PID
+    try:
+        local_host = socket.gethostname()
+    except OSError:
+        return False
+    if metadata.host is not None and metadata.host != local_host:
+        return False
+    try:
+        os.kill(metadata.pid, 0)
+        return False  # process is alive
+    except ProcessLookupError:
+        return True  # process is dead — lock is stale
+    except PermissionError:
+        return False  # process exists
 
 
 def format_metadata(metadata: LockMetadata) -> str:
@@ -287,6 +324,7 @@ def acquire(
     message: str | None = None,
     on_wait: Callable[[], None] | None = None,
     public_lock_dir_mode: int = DEFAULT_PUBLIC_LOCK_DIR_MODE,
+    holder_pid: int | None = None,
 ) -> LockHandle:
     if path.suffix.lower() == ".locket" or any(
         p.suffix.lower() == ".locket" for p in path.parents
@@ -310,8 +348,10 @@ def acquire(
 
     locket_dir = locket_dir_for(path)
     _check_lock_integrity(locket_dir, path)
+    if holder_pid is not None and holder_pid <= 0:
+        raise LockError("Error: --holder-pid must be a positive integer", EXIT_USAGE)
     token = secrets.token_hex(4)
-    metadata = build_metadata(message)
+    metadata = build_metadata(message, holder_pid=holder_pid)
     deadline = None if timeout is None else time.monotonic() + timeout
     reported_wait = False
 
@@ -344,6 +384,13 @@ def acquire(
                         continue
                     raise
                 if current is None:
+                    continue
+                if _is_lock_stale(current.metadata):
+                    # Holder is dead and lock is old enough — reap and retry
+                    try:
+                        release(path, current.token)
+                    except LockError:
+                        pass  # already gone or corrupt; retry will handle it
                     continue
                 if on_wait is not None and not reported_wait:
                     on_wait()

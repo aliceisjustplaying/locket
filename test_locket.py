@@ -345,6 +345,228 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(ctx.exception.exit_code, core.EXIT_IO)
         core.release(self.path, handle.token)
 
+    def test_acquire_reaps_lock_from_dead_local_process(self) -> None:
+        # Acquire a lock and then fake the metadata to look like it was
+        # held by a dead process on the local host.
+        handle = core.acquire(self.path)
+        locket_dir = core.locket_dir_for(self.path)
+        # Use a PID that is guaranteed not to exist (PID 1 is init/launchd
+        # and is always alive, so pick a large number unlikely to be in use).
+        dead_pid = 2_000_000_000
+        fake_metadata = core.LockMetadata(
+            locked_at=handle.metadata.locked_at,
+            message=handle.metadata.message,
+            pid=dead_pid,
+            locker_pid=handle.metadata.locker_pid,
+            user=handle.metadata.user,
+            host=handle.metadata.host,
+        )
+        # Overwrite the tag file with the dead PID
+        with core.temporarily_open_public_lock(locket_dir):
+            core.write_metadata(locket_dir, fake_metadata)
+        # A new acquire should auto-reap the stale lock and succeed
+        new_handle = core.acquire(self.path)
+        self.assertNotEqual(new_handle.token, handle.token)
+        core.release(self.path, new_handle.token)
+
+    def test_acquire_does_not_reap_lock_from_live_process(self) -> None:
+        # Acquire a lock with the current process's PID as holder
+        handle = core.acquire(self.path)
+        locket_dir = core.locket_dir_for(self.path)
+        # Overwrite metadata to use our own PID (which is alive)
+        live_metadata = core.LockMetadata(
+            locked_at=handle.metadata.locked_at,
+            message=handle.metadata.message,
+            pid=os.getpid(),
+            locker_pid=handle.metadata.locker_pid,
+            user=handle.metadata.user,
+            host=handle.metadata.host,
+        )
+        with core.temporarily_open_public_lock(locket_dir):
+            core.write_metadata(locket_dir, live_metadata)
+        # A new acquire with timeout=0 should fail (lock is not stale)
+        with self.assertRaises(core.LockError) as ctx:
+            core.acquire(self.path, timeout=0)
+        self.assertEqual(ctx.exception.exit_code, core.EXIT_TIMEOUT)
+        core.release(self.path, handle.token)
+
+    def test_acquire_does_not_reap_lock_from_remote_host(self) -> None:
+        # Acquire a lock, then fake metadata with a dead PID but different host
+        handle = core.acquire(self.path)
+        locket_dir = core.locket_dir_for(self.path)
+        remote_metadata = core.LockMetadata(
+            locked_at=handle.metadata.locked_at,
+            message=handle.metadata.message,
+            pid=2_000_000_000,
+            locker_pid=handle.metadata.locker_pid,
+            user=handle.metadata.user,
+            host="some-other-host.example.com",
+        )
+        with core.temporarily_open_public_lock(locket_dir):
+            core.write_metadata(locket_dir, remote_metadata)
+        # Should NOT reap — different host means we can't verify PID liveness
+        with self.assertRaises(core.LockError) as ctx:
+            core.acquire(self.path, timeout=0)
+        self.assertEqual(ctx.exception.exit_code, core.EXIT_TIMEOUT)
+        core.release(self.path, handle.token)
+
+    def test_metadata_records_both_pids(self) -> None:
+        handle = core.acquire(self.path)
+        # pid should be the parent (caller), locker_pid should be us
+        self.assertEqual(handle.metadata.pid, os.getppid())
+        self.assertEqual(handle.metadata.locker_pid, os.getpid())
+        core.release(self.path, handle.token)
+
+    def test_acquire_with_explicit_holder_pid(self) -> None:
+        handle = core.acquire(self.path, holder_pid=os.getpid())
+        self.assertEqual(handle.metadata.pid, os.getpid())
+        self.assertEqual(handle.metadata.locker_pid, os.getpid())
+        core.release(self.path, handle.token)
+
+    def test_acquire_rejects_zero_holder_pid(self) -> None:
+        with self.assertRaises(core.LockError) as ctx:
+            core.acquire(self.path, holder_pid=0)
+        self.assertEqual(ctx.exception.exit_code, core.EXIT_USAGE)
+
+    def test_acquire_rejects_negative_holder_pid(self) -> None:
+        with self.assertRaises(core.LockError) as ctx:
+            core.acquire(self.path, holder_pid=-1)
+        self.assertEqual(ctx.exception.exit_code, core.EXIT_USAGE)
+
+    def test_stale_lock_reap_stress(self) -> None:
+        """Multiple sequential acquire calls against stale locks should all succeed."""
+        dead_pid = 2_000_000_000
+        for i in range(10):
+            # Plant a stale lock
+            handle = core.acquire(self.path)
+            locket_dir = core.locket_dir_for(self.path)
+            fake_metadata = core.LockMetadata(
+                locked_at=handle.metadata.locked_at,
+                pid=dead_pid,
+                locker_pid=handle.metadata.locker_pid,
+                user=handle.metadata.user,
+                host=handle.metadata.host,
+            )
+            with core.temporarily_open_public_lock(locket_dir):
+                core.write_metadata(locket_dir, fake_metadata)
+            # Acquire should reap and succeed
+            new_handle = core.acquire(self.path, timeout=5)
+            self.assertNotEqual(new_handle.token, handle.token)
+            core.release(self.path, new_handle.token)
+
+    def test_concurrent_stale_reap_and_live_contention(self) -> None:
+        """A stale lock followed by live contention should work correctly."""
+        dead_pid = 2_000_000_000
+        # Plant a stale lock
+        handle = core.acquire(self.path)
+        locket_dir = core.locket_dir_for(self.path)
+        fake_metadata = core.LockMetadata(
+            locked_at=handle.metadata.locked_at,
+            pid=dead_pid,
+            locker_pid=handle.metadata.locker_pid,
+            user=handle.metadata.user,
+            host=handle.metadata.host,
+        )
+        with core.temporarily_open_public_lock(locket_dir):
+            core.write_metadata(locket_dir, fake_metadata)
+        # First acquire should reap the stale lock
+        h1 = core.acquire(self.path, holder_pid=os.getpid())
+        # Second acquire should block (h1 is alive) and timeout
+        with self.assertRaises(core.LockError) as ctx:
+            core.acquire(self.path, timeout=0.2)
+        self.assertEqual(ctx.exception.exit_code, core.EXIT_TIMEOUT)
+        core.release(self.path, h1.token)
+        # Now third acquire should succeed
+        h2 = core.acquire(self.path, timeout=1)
+        core.release(self.path, h2.token)
+
+
+    def test_cli_stale_reap_with_subprocess_workers(self) -> None:
+        """Realistic stress test: subprocess workers lock/edit/unlock a shared file.
+
+        One worker is killed mid-lock to create a stale lock. The remaining
+        workers should auto-reap it and continue without manual intervention.
+        """
+        shared_file = self.path
+        shared_file.write_text("", encoding="utf-8")
+
+        worker_script = textwrap.dedent(
+            f"""
+            import subprocess
+            import sys
+            import time
+            import os
+            from pathlib import Path
+
+            cli = {CLI!r}
+            path = Path({str(shared_file)!r})
+            worker_id = sys.argv[1]
+            should_die = sys.argv[2] == "die"
+
+            for i in range(5):
+                locked = subprocess.run(
+                    [*cli, "lock", str(path), "--holder-pid", str(os.getpid()), "--timeout", "10"],
+                    capture_output=True, text=True, check=False,
+                )
+                if locked.returncode != 0:
+                    print(f"W{{worker_id}} iter {{i}}: lock failed: {{locked.stderr}}")
+                    raise SystemExit(1)
+                token = locked.stdout.strip().split()[-1]
+
+                # Simulate work: append to shared file
+                with open(path, "a") as f:
+                    f.write(f"worker-{{worker_id}}-iter-{{i}}\\n")
+
+                if should_die and i == 2:
+                    # Die mid-lock without unlocking — simulates crashed agent
+                    print(f"W{{worker_id}}: dying with lock held (iter {{i}})")
+                    raise SystemExit(0)
+
+                unlocked = subprocess.run(
+                    [*cli, "unlock", str(path), token],
+                    capture_output=True, text=True, check=False,
+                )
+                if unlocked.returncode != 0:
+                    print(f"W{{worker_id}} iter {{i}}: unlock failed: {{unlocked.stderr}}")
+                    raise SystemExit(1)
+
+            print(f"W{{worker_id}}: completed all iterations")
+            """
+        )
+
+        # Start the dying worker first — it will lock, do 3 iterations, then die
+        # with the lock held, creating a stale lock.
+        dying_worker = subprocess.Popen(
+            [sys.executable, "-c", worker_script, "dying", "die"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        dying_output = dying_worker.communicate(timeout=30)
+        self.assertEqual(dying_worker.returncode, 0)
+        # The dying worker is now reaped (no zombie), and its lock is stale.
+
+        # Now start 3 live workers that must reap the stale lock and continue.
+        workers = [
+            subprocess.Popen(
+                [sys.executable, "-c", worker_script, str(i), "live"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            for i in range(3)
+        ]
+        outputs = [w.communicate(timeout=60) for w in workers]
+
+        for i, (worker, output) in enumerate(zip(workers, outputs)):
+            combined = "".join(output)
+            self.assertEqual(
+                worker.returncode, 0,
+                f"Live worker {i} failed:\n{combined}",
+            )
+
+        # Verify the shared file has content from all workers
+        content = shared_file.read_text(encoding="utf-8")
+        lines = [l for l in content.strip().split("\n") if l]
+        # dying worker × 3 iterations (0,1,2) + 3 live workers × 5 iterations
+        self.assertEqual(len(lines), 18, f"Expected 18 lines, got {len(lines)}:\n{content}")
+
 
 class CLITests(unittest.TestCase):
     def setUp(self) -> None:
